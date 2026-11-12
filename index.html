@@ -19,6 +19,8 @@
   button.sec, label.btn.sec { background:var(--card); color:var(--txt); }
   button.peligro { background:#7f1d1d; color:#fee2e2; }
   label.chk { display:flex; align-items:center; gap:8px; font-size:14px; color:var(--mut); margin:6px 0; }
+  #zoomBox { display:none; align-items:center; gap:10px; font-size:14px; color:var(--mut); margin:8px 0; }
+  #zoomBox input { flex:1; }
   input[type=text] { flex:1; min-width:0; padding:12px; border-radius:10px; border:1px solid #334155; background:var(--card); color:var(--txt); font-size:16px; }
   #msg { min-height:20px; font-size:14px; color:var(--mut); margin:8px 0; }
   #msg.ok { color:var(--ok); } #msg.err { color:var(--err); }
@@ -27,6 +29,7 @@
   li { background:var(--card); padding:8px 10px; border-radius:8px; margin-bottom:6px; font-size:15px; display:flex; align-items:center; gap:10px; }
   li .n { color:var(--mut); font-size:12px; min-width:28px; }
   li b { flex:1; word-break:break-all; }
+  li .f { color:var(--acc); font-size:11px; white-space:nowrap; }
   li .h { color:var(--mut); font-size:12px; white-space:nowrap; }
   li .x { flex:0 0 auto; min-width:0; width:32px; padding:4px 0; background:transparent; color:var(--mut); font-size:20px; }
   #vacio { text-align:center; color:var(--mut); padding:20px 0; }
@@ -45,10 +48,15 @@
 
   <div class="fila">
     <button id="btnCamara">Iniciar cámara</button>
+    <button id="btnLinterna" class="sec" style="display:none">Linterna</button>
     <label class="btn sec" for="foto">Escanear con foto</label>
     <input type="file" id="foto" accept="image/*" capture="environment" hidden>
   </div>
 
+  <div id="zoomBox"><span>Zoom</span><input type="range" id="zoom" min="1" max="1" step="0.1" value="1"></div>
+
+  <label class="chk"><input type="checkbox" id="chkConfirmar"> Confirmar con doble lectura (más lento, más seguro)</label>
+  <label class="chk"><input type="checkbox" id="chkValidar" checked> Validar dígito de control (productos EAN/UPC y guías postales)</label>
   <label class="chk"><input type="checkbox" id="chkUnicos"> Ignorar códigos que ya están en la lista</label>
   <label class="chk"><input type="checkbox" id="chkContinuo" checked> Escaneo continuo (sigue leyendo)</label>
 
@@ -81,6 +89,7 @@
   let lista = [];
   try { lista = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (_) { lista = []; }
   let scanner = null, escaneando = false, ultimoCodigo = "", ultimoTiempo = 0, confirmarBorrado = false;
+  let candidato = { c: "", n: 0, t: 0 }, ultimoAvisoDudoso = 0, linterna = false;
 
   const guardar = () => { try { localStorage.setItem(KEY, JSON.stringify(lista)); } catch (_) {} };
   const p2 = n => String(n).padStart(2, "0");
@@ -102,6 +111,34 @@
     if (navigator.vibrate) navigator.vibrate(60);
   }
 
+  // ---------- Validación del dígito de control (EAN-13, UPC-A, EAN-8) ----------
+  const FORMATOS_CON_CONTROL = ["EAN_13", "EAN_8", "UPC_A"];
+  function digitoControlOk(c) {
+    if (!/^\d+$/.test(c) || ![8, 12, 13].includes(c.length)) return true;
+    const d = c.split("").map(Number);
+    const ctrl = d.pop();
+    let suma = 0;
+    for (let i = d.length - 1, k = 0; i >= 0; i--, k++) suma += d[i] * (k % 2 === 0 ? 3 : 1);
+    return (10 - (suma % 10)) % 10 === ctrl;
+  }
+  const formatoDe = r => (r && r.result && r.result.format && r.result.format.formatName) ? String(r.result.format.formatName) : "";
+
+  // Guías postales UPU S10: 2 letras + 8 dígitos + 1 dígito de control + 2 letras
+  function s10Ok(c) {
+    const m = /^([A-Z]{2})(\d{8})(\d)([A-Z]{2})$/.exec(c);
+    if (!m) return true; // no tiene forma S10: no se juzga
+    const pesos = [8, 6, 4, 2, 3, 5, 9, 7];
+    const suma = m[2].split("").reduce((t, d, i) => t + Number(d) * pesos[i], 0);
+    let ctrl = 11 - (suma % 11);
+    if (ctrl === 10) ctrl = 0; else if (ctrl === 11) ctrl = 5;
+    return ctrl === Number(m[3]);
+  }
+  function lecturaDudosa(texto, f) {
+    if (!$("chkValidar").checked) return false;
+    if (FORMATOS_CON_CONTROL.includes(f) && !digitoControlOk(texto)) return true;
+    return !s10Ok(texto);
+  }
+
   function render() {
     $("contador").textContent = lista.length;
     const ul = $("lista");
@@ -112,10 +149,11 @@
       const li = document.createElement("li");
       const n = document.createElement("span"); n.className = "n"; n.textContent = String(i + 1);
       const c = document.createElement("b"); c.textContent = it.c;
+      const f = document.createElement("span"); f.className = "f"; f.textContent = (it.f || "").replace("_", " ");
       const h = document.createElement("span"); h.className = "h"; h.textContent = hora(it.t);
       const x = document.createElement("button"); x.className = "x"; x.textContent = "×"; x.setAttribute("aria-label", "Quitar");
       x.onclick = () => { lista.splice(i, 1); guardar(); render(); };
-      li.append(n, c, h, x);
+      li.append(n, c, f, h, x);
       ul.append(li);
     }
     $("vacio").style.display = lista.length ? "none" : "block";
@@ -123,18 +161,18 @@
     if (lista.length > MOSTRAR) aviso("Se muestran los últimos " + MOSTRAR + ". Al copiar o exportar va toda la lista.");
   }
 
-  function agregar(codigo) {
+  function agregar(codigo, formato) {
     codigo = String(codigo || "").trim();
     if (!codigo) return false;
     if ($("chkUnicos").checked && lista.some(x => x.c === codigo)) {
       aviso("Ya estaba en la lista: " + codigo);
       return false;
     }
-    lista.push({ c: codigo, t: new Date().toISOString() });
+    lista.push({ c: codigo, f: formato || "", t: new Date().toISOString() });
     guardar();
     render();
     feedback();
-    aviso("Agregado: " + codigo, "ok");
+    aviso("Agregado: " + codigo + (formato ? " (" + formato.replace("_", " ") + ")" : ""), "ok");
     return true;
   }
 
@@ -144,11 +182,31 @@
     return [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.CODABAR, F.QR_CODE, F.DATA_MATRIX];
   }
 
-  function alLeer(texto) {
+  function alLeer(texto, resultado) {
     const ahora = Date.now();
-    if (texto === ultimoCodigo && ahora - ultimoTiempo < 2000) { ultimoTiempo = ahora; return; }
+    const f = formatoDe(resultado);
+
+    // Descarta lecturas con dígito de control incorrecto (lecturas falsas)
+    if (lecturaDudosa(texto, f)) {
+      if (ahora - ultimoAvisoDudoso > 1500) { aviso("Lectura dudosa descartada. Mantén el código quieto y enfocado.", "err"); ultimoAvisoDudoso = ahora; }
+      return;
+    }
+
+    // Mismo código que ya se agregó: se ignora mientras siga frente a la cámara.
+    // Se libera cuando deja de verse ~1.2 s (para poder leerlo otra vez a propósito).
+    if (texto === ultimoCodigo && ahora - ultimoTiempo < 1200) { ultimoTiempo = ahora; return; }
+
+    // Doble lectura opcional (no aplica a QR)
+    if ($("chkConfirmar").checked && f !== "QR_CODE" && f !== "DATA_MATRIX") {
+      if (candidato.c === texto && ahora - candidato.t < 1200) candidato.n++;
+      else candidato = { c: texto, n: 1, t: ahora };
+      candidato.t = ahora;
+      if (candidato.n < 2) return;
+      candidato = { c: "", n: 0, t: 0 };
+    }
+
     ultimoCodigo = texto; ultimoTiempo = ahora;
-    agregar(texto);
+    agregar(texto, f);
     if (!$("chkContinuo").checked) detener();
   }
 
@@ -156,30 +214,64 @@
     if (escaneando) return;
     try {
       scanner = new Html5Qrcode("lector", { formatsToSupport: formatos(), useBarCodeDetectorIfSupported: true, verbose: false });
-      const cfg = { fps: 15, qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h, w) * 0.45) }) };
+      const cfg = {
+        fps: 15,
+        videoConstraints: {
+          facingMode: "environment",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: "continuous" }]
+        }
+      };
       try {
         await scanner.start({ facingMode: "environment" }, cfg, alLeer, () => {});
       } catch (e1) {
         const cams = await Html5Qrcode.getCameras();
         if (!cams.length) throw e1;
-        await scanner.start(cams[0].id, cfg, alLeer, () => {});
+        await scanner.start(cams[0].id, { fps: 12 }, alLeer, () => {});
       }
       escaneando = true;
       $("lector").style.minHeight = "240px";
       $("btnCamara").textContent = "Detener cámara";
-      aviso("Cámara lista. Apunta al código.", "ok");
+      aviso("Cámara lista. Apunta al código, a unos 10-20 cm, con buena luz. Si el código está en vertical, gira el celular de lado.", "ok");
+      configurarControles();
+      enfocar();
     } catch (e) {
       $("lector").style.minHeight = "0";
-      aviso("No se pudo abrir la cámara en vivo aquí. Usa 'Escanear con foto' o abre este archivo en Chrome.", "err");
+      aviso("No se pudo abrir la cámara en vivo aquí. Usa 'Escanear con foto'.", "err");
     }
+  }
+
+  // Pide enfoque continuo a la cámara (si el teléfono lo permite)
+  function enfocar() {
+    try {
+      const v = document.querySelector("#lector video");
+      const t = v && v.srcObject && v.srcObject.getVideoTracks()[0];
+      if (t && t.applyConstraints) t.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    } catch (_) {}
+  }
+
+  function configurarControles() {
+    try {
+      const caps = scanner.getRunningTrackCapabilities && scanner.getRunningTrackCapabilities();
+      if (!caps) return;
+      if (caps.torch) $("btnLinterna").style.display = "block";
+      if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+        const z = $("zoom");
+        z.min = caps.zoom.min; z.max = caps.zoom.max; z.step = caps.zoom.step || 0.1; z.value = caps.zoom.min;
+        $("zoomBox").style.display = "flex";
+      }
+    } catch (_) {}
   }
 
   async function detener() {
     if (!escaneando) return;
     try { await scanner.stop(); scanner.clear(); } catch (_) {}
-    escaneando = false;
+    escaneando = false; linterna = false;
     $("lector").style.minHeight = "0";
     $("btnCamara").textContent = "Iniciar cámara";
+    $("btnLinterna").style.display = "none";
+    $("zoomBox").style.display = "none";
   }
 
   // ---------- Escaneo con foto (respaldo) ----------
@@ -188,9 +280,19 @@
     aviso("Leyendo la foto...");
     try {
       const lector = new Html5Qrcode("oculto", { formatsToSupport: formatos(), useBarCodeDetectorIfSupported: true, verbose: false });
-      const texto = await lector.scanFile(archivo, false);
+      let texto, f = "";
+      if (lector.scanFileV2) {
+        const r = await lector.scanFileV2(archivo, false);
+        texto = r.decodedText; f = formatoDe(r);
+      } else {
+        texto = await lector.scanFile(archivo, false);
+      }
       try { lector.clear(); } catch (_) {}
-      agregar(texto);
+      if (lecturaDudosa(texto, f)) {
+        aviso("La lectura salió dudosa (" + texto + "). Toma otra foto, más cerca y con buena luz.", "err");
+      } else {
+        agregar(texto, f);
+      }
     } catch (_) {
       aviso("No se encontró un código en la foto. Acércate, con buena luz y el código recto.", "err");
     }
@@ -219,7 +321,7 @@
   // Los códigos solo con números se escriben como ="123" para que Excel no
   // les quite ceros ni los convierta en notación científica.
   const celda = c => /^\d+$/.test(c) ? '"=""' + c + '"""' : '"' + c.replace(/"/g, '""') + '"';
-  const construirCsv = () => "﻿" + "codigo;fecha_hora\r\n" + lista.map(x => celda(x.c) + ";" + fecha(x.t)).join("\r\n") + "\r\n";
+  const construirCsv = () => "﻿" + "codigo;formato;fecha_hora\r\n" + lista.map(x => celda(x.c) + ";" + (x.f || "") + ";" + fecha(x.t)).join("\r\n") + "\r\n";
 
   function descargar() {
     if (!lista.length) return aviso("La lista está vacía.");
@@ -262,6 +364,13 @@
 
   // ---------- Eventos ----------
   $("btnCamara").onclick = () => escaneando ? detener() : iniciar();
+  $("btnLinterna").onclick = async () => {
+    linterna = !linterna;
+    try { await scanner.applyVideoConstraints({ advanced: [{ torch: linterna }] }); } catch (_) {}
+  };
+  $("zoom").oninput = async e => {
+    try { await scanner.applyVideoConstraints({ advanced: [{ zoom: Number(e.target.value) }] }); } catch (_) {}
+  };
   $("foto").onchange = e => desdeFoto(e.target.files && e.target.files[0]);
   $("btnManual").onclick = () => { if (agregar($("manual").value)) $("manual").value = ""; };
   $("manual").addEventListener("keydown", e => { if (e.key === "Enter") $("btnManual").click(); });
