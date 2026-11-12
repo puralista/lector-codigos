@@ -13,7 +13,11 @@
   #badge { background:var(--card); border-radius:999px; padding:4px 12px; font-size:14px; color:var(--mut); }
   #badge b { color:var(--txt); font-size:16px; }
   main { padding:0 16px 16px; max-width:560px; margin:0 auto; }
-  #lector { width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:0; }
+  #lector { width:100%; height:0; border-radius:12px; overflow:hidden; background:#000; position:relative; }
+  #lector.on { height:34vh; max-height:300px; min-height:180px; }
+  #lector video { width:100% !important; height:100% !important; object-fit:cover; display:block; }
+  #lector > div { height:100%; }
+  #guia { position:absolute; left:8%; right:8%; top:22%; bottom:22%; border:2px solid rgba(56,189,248,.9); border-radius:10px; pointer-events:none; box-shadow:0 0 0 999px rgba(0,0,0,.25); }
   .fila { display:flex; gap:8px; margin:10px 0; flex-wrap:wrap; }
   button, label.btn { flex:1; min-width:120px; padding:12px; border:0; border-radius:10px; font-size:15px; font-weight:600; background:var(--acc); color:#082f49; cursor:pointer; text-align:center; }
   button.sec, label.btn.sec { background:var(--card); color:var(--txt); }
@@ -210,50 +214,114 @@
     if (!$("chkContinuo").checked) detener();
   }
 
+  // ---------- Motor de cámara ----------
+  let stream = null, video = null, detector = null, temporizador = 0, pista = null, nativo = false;
+  let cand2 = { c: "", n: 0, t: 0 }, ultimoCortado = 0;
+  const FORMATOS_NATIVOS = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39","code_93","itf","codabar","qr_code","data_matrix"];
+
+  // ¿Se puede dar por buena una sola lectura? (tiene dígito de control que la respalda)
+  function respaldada(texto, f) {
+    if (FORMATOS_CON_CONTROL.includes(f)) return true;
+    return /^[A-Z]{2}\d{8}\d[A-Z]{2}$/.test(texto) && s10Ok(texto);
+  }
+
+  async function bucleNativo() {
+    if (!nativo) return;
+    try {
+      if (video && video.readyState >= 2) {
+        const res = await detector.detect(video);
+        const W = video.videoWidth, H = video.videoHeight, mx = W * 0.02, my = H * 0.02;
+        for (const r of res) {
+          const texto = String(r.rawValue || "").trim();
+          if (!texto) continue;
+          // Descarta códigos cortados por el borde de la imagen (lecturas parciales)
+          const pts = r.cornerPoints || [];
+          const cortado = pts.some(p => p.x < mx || p.x > W - mx || p.y < my || p.y > H - my);
+          if (cortado) {
+            const t = Date.now();
+            if (t - ultimoCortado > 1500) { aviso("El código está cortado. Aleja un poco el celular.", "err"); ultimoCortado = t; }
+            continue;
+          }
+          const f = String(r.format || "").toUpperCase();
+          const ahora = Date.now();
+          // Sin dígito de control: exige verlo igual en 2 cuadros seguidos (rápido con este motor)
+          if (!respaldada(texto, f) && f !== "QR_CODE" && f !== "DATA_MATRIX") {
+            if (cand2.c === texto && ahora - cand2.t < 600) cand2.n++;
+            else cand2 = { c: texto, n: 1, t: ahora };
+            cand2.t = ahora;
+            if (cand2.n < 2) continue;
+          }
+          alLeer(texto, { result: { format: { formatName: f } } });
+          break;
+        }
+      }
+    } catch (_) {}
+    if (nativo) temporizador = setTimeout(bucleNativo, 60);
+  }
+
+  async function iniciarNativo() {
+    const sop = await BarcodeDetector.getSupportedFormats();
+    detector = new BarcodeDetector({ formats: FORMATOS_NATIVOS.filter(x => sop.includes(x)) });
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false
+    });
+    video = document.createElement("video");
+    video.setAttribute("playsinline", ""); video.muted = true; video.srcObject = stream;
+    const cont = $("lector"); cont.innerHTML = ""; cont.appendChild(video);
+    const g = document.createElement("div"); g.id = "guia"; cont.appendChild(g);
+    await video.play();
+    pista = stream.getVideoTracks()[0];
+    nativo = true;
+    bucleNativo();
+  }
+
+  async function iniciarRespaldo() {
+    scanner = new Html5Qrcode("lector", { formatsToSupport: formatos(), useBarCodeDetectorIfSupported: true, verbose: false });
+    const cfg = {
+      fps: 15,
+      videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: "continuous" }] }
+    };
+    try {
+      await scanner.start({ facingMode: "environment" }, cfg, alLeer, () => {});
+    } catch (e1) {
+      const cams = await Html5Qrcode.getCameras();
+      if (!cams.length) throw e1;
+      await scanner.start(cams[0].id, { fps: 12 }, alLeer, () => {});
+    }
+    const v = document.querySelector("#lector video");
+    pista = v && v.srcObject && v.srcObject.getVideoTracks()[0];
+  }
+
   async function iniciar() {
     if (escaneando) return;
+    $("lector").classList.add("on");
     try {
-      scanner = new Html5Qrcode("lector", { formatsToSupport: formatos(), useBarCodeDetectorIfSupported: true, verbose: false });
-      const cfg = {
-        fps: 15,
-        videoConstraints: {
-          facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          advanced: [{ focusMode: "continuous" }]
+      if ("BarcodeDetector" in window) {
+        try { await iniciarNativo(); }
+        catch (e) {
+          if (e && (e.name === "NotAllowedError" || e.name === "NotFoundError")) throw e;
+          nativo = false; await iniciarRespaldo();
         }
-      };
-      try {
-        await scanner.start({ facingMode: "environment" }, cfg, alLeer, () => {});
-      } catch (e1) {
-        const cams = await Html5Qrcode.getCameras();
-        if (!cams.length) throw e1;
-        await scanner.start(cams[0].id, { fps: 12 }, alLeer, () => {});
+      } else {
+        await iniciarRespaldo();
       }
       escaneando = true;
-      $("lector").style.minHeight = "240px";
       $("btnCamara").textContent = "Detener cámara";
-      aviso("Cámara lista. Apunta al código, a unos 10-20 cm, con buena luz. Si el código está en vertical, gira el celular de lado.", "ok");
+      aviso("Cámara lista. Centra el código en el recuadro, a unos 10-20 cm. Si está en vertical, gira el celular.", "ok");
       configurarControles();
       enfocar();
     } catch (e) {
-      $("lector").style.minHeight = "0";
+      $("lector").classList.remove("on");
       aviso("No se pudo abrir la cámara en vivo aquí. Usa 'Escanear con foto'.", "err");
     }
   }
 
-  // Pide enfoque continuo a la cámara (si el teléfono lo permite)
-  function enfocar() {
-    try {
-      const v = document.querySelector("#lector video");
-      const t = v && v.srcObject && v.srcObject.getVideoTracks()[0];
-      if (t && t.applyConstraints) t.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
-    } catch (_) {}
-  }
+  const aplicarCam = c => pista && pista.applyConstraints ? pista.applyConstraints({ advanced: [c] }) : Promise.resolve();
+  function enfocar() { aplicarCam({ focusMode: "continuous" }).catch(() => {}); }
 
   function configurarControles() {
     try {
-      const caps = scanner.getRunningTrackCapabilities && scanner.getRunningTrackCapabilities();
+      const caps = pista && pista.getCapabilities && pista.getCapabilities();
       if (!caps) return;
       if (caps.torch) $("btnLinterna").style.display = "block";
       if (caps.zoom && caps.zoom.max > caps.zoom.min) {
@@ -266,9 +334,12 @@
 
   async function detener() {
     if (!escaneando) return;
-    try { await scanner.stop(); scanner.clear(); } catch (_) {}
+    nativo = false; clearTimeout(temporizador);
+    try { if (stream) stream.getTracks().forEach(t => t.stop()); } catch (_) {}
+    try { if (scanner) { await scanner.stop(); scanner.clear(); } } catch (_) {}
+    stream = null; scanner = null; video = null; pista = null;
+    $("lector").innerHTML = ""; $("lector").classList.remove("on");
     escaneando = false; linterna = false;
-    $("lector").style.minHeight = "0";
     $("btnCamara").textContent = "Iniciar cámara";
     $("btnLinterna").style.display = "none";
     $("zoomBox").style.display = "none";
@@ -366,10 +437,10 @@
   $("btnCamara").onclick = () => escaneando ? detener() : iniciar();
   $("btnLinterna").onclick = async () => {
     linterna = !linterna;
-    try { await scanner.applyVideoConstraints({ advanced: [{ torch: linterna }] }); } catch (_) {}
+    try { await aplicarCam({ torch: linterna }); } catch (_) {}
   };
   $("zoom").oninput = async e => {
-    try { await scanner.applyVideoConstraints({ advanced: [{ zoom: Number(e.target.value) }] }); } catch (_) {}
+    try { await aplicarCam({ zoom: Number(e.target.value) }); } catch (_) {}
   };
   $("foto").onchange = e => desdeFoto(e.target.files && e.target.files[0]);
   $("btnManual").onclick = () => { if (agregar($("manual").value)) $("manual").value = ""; };
